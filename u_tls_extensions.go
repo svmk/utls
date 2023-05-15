@@ -77,7 +77,9 @@ func ExtensionFromID(id uint16) TLSExtension {
 		return &RenegotiationInfoExtension{}
 	default:
 		if isGREASEUint16(id) {
-			return &UtlsGREASEExtension{}
+			return &UtlsGREASEExtension{
+				Value: id,
+			}
 		}
 		return nil // not returning GenericExtension, it should be handled by caller
 	}
