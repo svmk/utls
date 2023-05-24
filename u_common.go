@@ -174,6 +174,21 @@ type ClientHelloSpec struct {
 //
 // example: []byte{0x13, 0x01, 0x13, 0x02, 0x13, 0x03} => []uint16{0x1301, 0x1302, 0x1303}
 func (chs *ClientHelloSpec) ReadCipherSuites(b []byte) error {
+	err := chs.ReadRawCipherSuites(b)
+	if err != nil {
+		return err
+	}
+	for index := range chs.CipherSuites {
+		chs.CipherSuites[index] = unGREASEUint16(chs.CipherSuites[index])
+	}
+	return nil
+}
+
+// ReadCipherSuites is a helper function to construct a list of cipher suites from
+// a []byte into []uint16 without grease transformation.
+//
+// example: []byte{0x13, 0x01, 0x13, 0x02, 0x13, 0x03} => []uint16{0x1301, 0x1302, 0x1303}
+func (chs *ClientHelloSpec) ReadRawCipherSuites(b []byte) error {
 	cipherSuites := []uint16{}
 	s := cryptobyte.String(b)
 	for !s.Empty() {
@@ -181,7 +196,7 @@ func (chs *ClientHelloSpec) ReadCipherSuites(b []byte) error {
 		if !s.ReadUint16(&suite) {
 			return errors.New("unable to read ciphersuite")
 		}
-		cipherSuites = append(cipherSuites, unGREASEUint16(suite))
+		cipherSuites = append(cipherSuites, suite)
 	}
 	chs.CipherSuites = cipherSuites
 	return nil
@@ -213,6 +228,56 @@ func (chs *ClientHelloSpec) ReadTLSExtensions(b []byte, allowBluntMimicry bool) 
 		ext := ExtensionFromID(extension)
 		extWriter, ok := ext.(TLSExtensionWriter)
 		if ext != nil && ok { // known extension and implements TLSExtensionWriter properly
+			if extension == extensionSupportedVersions {
+				chs.TLSVersMin = 0
+				chs.TLSVersMax = 0
+			}
+			if _, err := extWriter.Write(extData); err != nil {
+				return err
+			}
+
+			chs.Extensions = append(chs.Extensions, extWriter)
+		} else {
+			if allowBluntMimicry {
+				chs.Extensions = append(chs.Extensions, &GenericExtension{extension, extData})
+			} else {
+				return fmt.Errorf("unsupported extension %d", extension)
+			}
+		}
+	}
+	return nil
+}
+
+// ReadTLSExtensions is a helper function to construct a list of TLS extensions from
+// a byte slice into []TLSExtension without grase transformation.
+//
+// If keepPSK is not set, the PSK extension will cause an error.
+func (chs *ClientHelloSpec) ReadRawTLSExtensions(b []byte, allowBluntMimicry bool) error {
+	extensions := cryptobyte.String(b)
+	for !extensions.Empty() {
+		var extension uint16
+		var extData cryptobyte.String
+		if !extensions.ReadUint16(&extension) {
+			return fmt.Errorf("unable to read extension ID")
+		}
+		if !extensions.ReadUint16LengthPrefixed(&extData) {
+			return fmt.Errorf("unable to read data for extension %x", extension)
+		}
+
+		ext := ExtensionFromID(extension)
+		extWriter, ok := ext.(TLSExtensionWriter)
+		extRawWriter, okRaw := ext.(TLSExtensionRawWriter)
+		if extRawWriter != nil && okRaw {
+			if extension == extensionSupportedVersions {
+				chs.TLSVersMin = 0
+				chs.TLSVersMax = 0
+			}
+			if _, err := extRawWriter.WriteRaw(extData); err != nil {
+				return err
+			}
+
+			chs.Extensions = append(chs.Extensions, extWriter)
+		} else if ext != nil && ok { // known extension and implements TLSExtensionWriter properly
 			if extension == extensionSupportedVersions {
 				chs.TLSVersMin = 0
 				chs.TLSVersMax = 0
@@ -440,15 +505,12 @@ func (chs *ClientHelloSpec) ImportTLSClientHelloFromJSON(jsonB []byte) error {
 }
 
 // FromRaw converts a ClientHello message in the form of raw bytes into a ClientHelloSpec.
-func (chs *ClientHelloSpec) FromRaw(raw []byte, allowBluntMimicry ...bool) error {
+func (chs *ClientHelloSpec) FromRaw(raw []byte, allowBluntMimicry bool, readRaw bool) error {
 	if chs == nil {
 		return errors.New("cannot unmarshal into nil ClientHelloSpec")
 	}
 
-	var bluntMimicry = false
-	if len(allowBluntMimicry) == 1 {
-		bluntMimicry = allowBluntMimicry[0]
-	}
+	var bluntMimicry = allowBluntMimicry
 
 	*chs = ClientHelloSpec{} // reset
 	s := cryptobyte.String(raw)
@@ -490,8 +552,14 @@ func (chs *ClientHelloSpec) FromRaw(raw []byte, allowBluntMimicry ...bool) error
 		return errors.New("unable to read ciphersuites")
 	}
 
-	if err := chs.ReadCipherSuites(cipherSuitesBytes); err != nil {
-		return err
+	if readRaw {
+		if err := chs.ReadRawCipherSuites(cipherSuitesBytes); err != nil {
+			return err
+		}
+	} else {
+		if err := chs.ReadCipherSuites(cipherSuitesBytes); err != nil {
+			return err
+		}
 	}
 
 	// CompressionMethods
@@ -514,8 +582,14 @@ func (chs *ClientHelloSpec) FromRaw(raw []byte, allowBluntMimicry ...bool) error
 		return errors.New("unable to read extensions data")
 	}
 
-	if err := chs.ReadTLSExtensions(extensions, bluntMimicry); err != nil {
-		return err
+	if readRaw {
+		if err := chs.ReadRawTLSExtensions(extensions, bluntMimicry); err != nil {
+			return err
+		}
+	} else {
+		if err := chs.ReadTLSExtensions(extensions, bluntMimicry); err != nil {
+			return err
+		}
 	}
 
 	return nil

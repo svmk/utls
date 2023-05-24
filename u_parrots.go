@@ -2006,6 +2006,62 @@ func (uconn *UConn) applyPresetByID(id ClientHelloID) (err error) {
 // Fields of TLSExtensions that are slices/pointers are shared across different connections with
 // same ClientHelloSpec. It is advised to use different specs and avoid any shared state.
 func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
+	err := uconn.ApplyRawPreset(p)
+	if err != nil {
+		return err
+	}
+	// Currently, GREASE is assumed to come from BoringSSL
+	grease_bytes := make([]byte, 2*ssl_grease_last_index)
+	_, err = io.ReadFull(uconn.config.rand(), grease_bytes)
+	if err != nil {
+		return errors.New("tls: short read from Rand: " + err.Error())
+	}
+	for i := range uconn.greaseSeed {
+		uconn.greaseSeed[i] = binary.LittleEndian.Uint16(grease_bytes[2*i : 2*i+2])
+	}
+	if GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_extension1) == GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_extension2) {
+		uconn.greaseSeed[ssl_grease_extension2] ^= 0x1010
+	}
+
+	hello := uconn.HandshakeState.Hello
+
+	for i := range hello.CipherSuites {
+		if isGREASEUint16(hello.CipherSuites[i]) { // just in case the user set a GREASE value instead of unGREASEd
+			hello.CipherSuites[i] = GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_cipher)
+		}
+	}
+	grease_extensions_seen := 0
+	for _, e := range uconn.Extensions {
+		switch ext := e.(type) {
+		case *UtlsGREASEExtension:
+			switch grease_extensions_seen {
+			case 0:
+				ext.Value = GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_extension1)
+			case 1:
+				ext.Value = GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_extension2)
+				ext.Body = []byte{0}
+			default:
+				return errors.New("at most 2 grease extensions are supported")
+			}
+			grease_extensions_seen += 1
+		case *SupportedCurvesExtension:
+			for i := range ext.Curves {
+				if isGREASEUint16(uint16(ext.Curves[i])) {
+					ext.Curves[i] = CurveID(GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_group))
+				}
+			}
+		case *SupportedVersionsExtension:
+			for i := range ext.Versions {
+				if isGREASEUint16(ext.Versions[i]) { // just in case the user set a GREASE value instead of unGREASEd
+					ext.Versions[i] = GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_version)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (uconn *UConn) ApplyRawPreset(p *ClientHelloSpec) error {
 	var err error
 
 	err = uconn.SetTLSVers(p.TLSVersMin, p.TLSVersMax, p.Extensions)
@@ -2021,6 +2077,8 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 	uconn.HandshakeState.State13.EcdheParams = ecdheParams
 	uconn.HandshakeState.State13.KeySharesEcdheParams = make(KeySharesEcdheParameters, 2)
 	hello := uconn.HandshakeState.Hello
+	hello.CipherSuites = make([]uint16, len(p.CipherSuites))
+	copy(hello.CipherSuites, p.CipherSuites)
 	session := uconn.HandshakeState.Session
 
 	switch len(hello.Random) {
@@ -2043,27 +2101,6 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 		hello.CompressionMethods = []uint8{compressionNone}
 	}
 
-	// Currently, GREASE is assumed to come from BoringSSL
-	grease_bytes := make([]byte, 2*ssl_grease_last_index)
-	grease_extensions_seen := 0
-	_, err = io.ReadFull(uconn.config.rand(), grease_bytes)
-	if err != nil {
-		return errors.New("tls: short read from Rand: " + err.Error())
-	}
-	for i := range uconn.greaseSeed {
-		uconn.greaseSeed[i] = binary.LittleEndian.Uint16(grease_bytes[2*i : 2*i+2])
-	}
-	if GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_extension1) == GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_extension2) {
-		uconn.greaseSeed[ssl_grease_extension2] ^= 0x1010
-	}
-
-	hello.CipherSuites = make([]uint16, len(p.CipherSuites))
-	copy(hello.CipherSuites, p.CipherSuites)
-	for i := range hello.CipherSuites {
-		if isGREASEUint16(hello.CipherSuites[i]) { // just in case the user set a GREASE value instead of unGREASEd
-			hello.CipherSuites[i] = GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_cipher)
-		}
-	}
 	uconn.GetSessionID = p.GetSessionID
 	uconn.Extensions = make([]TLSExtension, len(p.Extensions))
 	copy(uconn.Extensions, p.Extensions)
@@ -2078,17 +2115,6 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 			if ext.ServerName == "" {
 				ext.ServerName = uconn.config.ServerName
 			}
-		case *UtlsGREASEExtension:
-			switch grease_extensions_seen {
-			case 0:
-				ext.Value = GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_extension1)
-			case 1:
-				ext.Value = GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_extension2)
-				ext.Body = []byte{0}
-			default:
-				return errors.New("at most 2 grease extensions are supported")
-			}
-			grease_extensions_seen += 1
 		case *SessionTicketExtension:
 			if session == nil && uconn.config.ClientSessionCache != nil {
 				cacheKey := clientSessionCacheKey(uconn.RemoteAddr(), uconn.config)
@@ -2099,18 +2125,12 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 			if err != nil {
 				return err
 			}
-		case *SupportedCurvesExtension:
-			for i := range ext.Curves {
-				if isGREASEUint16(uint16(ext.Curves[i])) {
-					ext.Curves[i] = CurveID(GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_group))
-				}
-			}
 		case *KeyShareExtension:
 			preferredCurveIsSet := false
 			for i := range ext.KeyShares {
 				curveID := ext.KeyShares[i].Group
 				if isGREASEUint16(uint16(curveID)) { // just in case the user set a GREASE value instead of unGREASEd
-					ext.KeyShares[i].Group = CurveID(GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_group))
+					// ext.KeyShares[i].Group = CurveID(GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_group))
 					continue
 				}
 				if len(ext.KeyShares[i].Data) > 1 {
@@ -2128,12 +2148,6 @@ func (uconn *UConn) ApplyPreset(p *ClientHelloSpec) error {
 					// only do this once for the first non-grease curve
 					uconn.HandshakeState.State13.EcdheParams = ecdheParams
 					preferredCurveIsSet = true
-				}
-			}
-		case *SupportedVersionsExtension:
-			for i := range ext.Versions {
-				if isGREASEUint16(ext.Versions[i]) { // just in case the user set a GREASE value instead of unGREASEd
-					ext.Versions[i] = GetBoringGREASEValue(uconn.greaseSeed, ssl_grease_version)
 				}
 			}
 		case *NPNExtension:

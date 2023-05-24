@@ -77,7 +77,9 @@ func ExtensionFromID(id uint16) TLSExtension {
 		return &RenegotiationInfoExtension{}
 	default:
 		if isGREASEUint16(id) {
-			return &UtlsGREASEExtension{}
+			return &UtlsGREASEExtension{
+				Value: id,
+			}
 		}
 		return nil // not returning GenericExtension, it should be handled by caller
 	}
@@ -101,6 +103,16 @@ type TLSExtensionWriter interface {
 	// Write writes up to len(b) bytes from b.
 	// It returns the number of bytes written (0 <= n <= len(b)) and any error encountered.
 	Write(b []byte) (n int, err error)
+}
+
+// TLSExtensionWriter is an interface allowing a TLS extension to be
+// auto-constucted/recovered by reading in a byte stream without grease transformation.
+type TLSExtensionRawWriter interface {
+	TLSExtension
+
+	// Write writes up to len(b) bytes from b.
+	// It returns the number of bytes written (0 <= n <= len(b)) and any error encountered.
+	WriteRaw(b []byte) (n int, err error)
 }
 
 type TLSExtensionJSON interface {
@@ -299,6 +311,17 @@ func (e *SupportedCurvesExtension) UnmarshalJSON(data []byte) error {
 }
 
 func (e *SupportedCurvesExtension) Write(b []byte) (int, error) {
+	fullLen, err := e.WriteRaw(b)
+	if err != nil {
+		return fullLen, err
+	}
+	for index := range e.Curves {
+		e.Curves[index] = CurveID(unGREASEUint16(uint16(e.Curves[index])))
+	}
+	return fullLen, err
+}
+
+func (e *SupportedCurvesExtension) WriteRaw(b []byte) (int, error) {
 	fullLen := len(b)
 	extData := cryptobyte.String(b)
 	// RFC 4492, sections 5.1.1 and RFC 8446, Section 4.2.7
@@ -312,7 +335,7 @@ func (e *SupportedCurvesExtension) Write(b []byte) (int, error) {
 		if !curvesBytes.ReadUint16(&curve) {
 			return 0, errors.New("unable to read supported curves extension data")
 		}
-		curves = append(curves, CurveID(unGREASEUint16(curve)))
+		curves = append(curves, CurveID(curve))
 	}
 	e.Curves = curves
 	return fullLen, nil
@@ -989,7 +1012,6 @@ func (e *UtlsGREASEExtension) Read(b []byte) (int, error) {
 }
 
 func (e *UtlsGREASEExtension) Write(b []byte) (int, error) {
-	e.Value = GREASE_PLACEHOLDER
 	e.Body = make([]byte, len(b))
 	n := copy(e.Body, b)
 	return n, nil
@@ -1232,6 +1254,19 @@ func (e *KeyShareExtension) Read(b []byte) (int, error) {
 }
 
 func (e *KeyShareExtension) Write(b []byte) (int, error) {
+	fullLen, err := e.WriteRaw(b)
+	if err != nil {
+		return fullLen, err
+	}
+	for index := range e.KeyShares {
+		keyShare := e.KeyShares[index]
+		keyShare.Group = CurveID(unGREASEUint16(uint16(keyShare.Group)))
+		e.KeyShares[index] = keyShare
+	}
+	return fullLen, err
+}
+
+func (e *KeyShareExtension) WriteRaw(b []byte) (int, error) {
 	fullLen := len(b)
 	extData := cryptobyte.String(b)
 	// RFC 8446, Section 4.2.8
@@ -1248,10 +1283,10 @@ func (e *KeyShareExtension) Write(b []byte) (int, error) {
 			len(ks.Data) == 0 {
 			return 0, errors.New("unable to read key share extension data")
 		}
-		ks.Group = CurveID(unGREASEUint16(group))
+		ks.Group = CurveID(group)
 		// if not GREASE, key share data will be discarded as it should
 		// be generated per connection
-		if ks.Group != GREASE_PLACEHOLDER {
+		if !isGREASEUint16(uint16(ks.Group)) {
 			ks.Data = nil
 		}
 		keyShares = append(keyShares, ks)
@@ -1408,7 +1443,7 @@ func (e *SupportedVersionsExtension) Read(b []byte) (int, error) {
 	return e.Len(), io.EOF
 }
 
-func (e *SupportedVersionsExtension) Write(b []byte) (int, error) {
+func (e *SupportedVersionsExtension) WriteRaw(b []byte) (int, error) {
 	fullLen := len(b)
 	extData := cryptobyte.String(b)
 	// RFC 8446, Section 4.2.1
@@ -1422,10 +1457,21 @@ func (e *SupportedVersionsExtension) Write(b []byte) (int, error) {
 		if !versList.ReadUint16(&vers) {
 			return 0, errors.New("unable to read supported versions extension data")
 		}
-		supportedVersions = append(supportedVersions, unGREASEUint16(vers))
+		supportedVersions = append(supportedVersions, vers)
 	}
 	e.Versions = supportedVersions
 	return fullLen, nil
+}
+
+func (e *SupportedVersionsExtension) Write(b []byte) (int, error) {
+	fullLen, err := e.WriteRaw(b)
+	if err != nil {
+		return fullLen, err
+	}
+	for index := range e.Versions {
+		e.Versions[index] = unGREASEUint16(e.Versions[index])
+	}
+	return fullLen, err
 }
 
 func (e *SupportedVersionsExtension) UnmarshalJSON(b []byte) error {
