@@ -586,7 +586,7 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 		}
 
 		// Chrome 107 started shuffling the order of extensions
-		shuffleExtensions(&chs)
+		ShuffleExtensions(&chs)
 		return chs, err
 	case HelloChrome_112_PSK_Shuf:
 		chs, err := utlsIdToSpec(HelloChrome_100_PSK)
@@ -595,7 +595,7 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 		}
 
 		// Chrome 112 started shuffling the order of extensions
-		shuffleExtensions(&chs)
+		ShuffleExtensions(&chs)
 		return chs, err
 	case HelloFirefox_55, HelloFirefox_56:
 		return ClientHelloSpec{
@@ -1934,7 +1934,7 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 	}
 }
 
-func shuffleExtensions(chs *ClientHelloSpec) error {
+func ShuffleExtensions(chs *ClientHelloSpec) error {
 	// Shuffle extensions to avoid fingerprinting -- introduced in Chrome 106
 	var err error = nil
 
